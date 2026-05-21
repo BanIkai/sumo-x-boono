@@ -81,22 +81,17 @@ static inline void runStrategy() {
     // ----- read sensors -----
     readSensors(gSens);
 
-    // ----- emergency stop ถ้า edge ทั้งสองข้างต่ำกว่า 200 -----
-    if (gSens.el < 850 || gSens.er < 850) {
-        stopMotors();
-        while (true);
+    // ----- edge always has priority — ขัดจังหวะทุก state ทันที -----
+    if (isOnEdge(gSens)) {
+        if (!gEdgeHandled) {
+            gPrevState   = gState;
+            gEdgeHandled = true;
+            setState(STATE_EDGE_AVOID);
+        }
+        handleEdgeAvoid();   // รันทันทีเลย ไม่รอ dispatch
         return;
     }
-
-    // ----- edge always has priority -----
-    if (isOnEdge(gSens) && !gEdgeHandled) {
-        gPrevState   = gState;
-        gEdgeHandled = true;
-        setState(STATE_EDGE_AVOID);
-    }
-    if (!isOnEdge(gSens)) {
-        gEdgeHandled = false;
-    }
+    gEdgeHandled = false;
 
     // ----- dispatch -----
     switch (gState) {
@@ -226,28 +221,33 @@ static void handleDefend() {
 }
 
 // =====================================================
-//  EDGE_AVOID
+//  EDGE_AVOID — ถอยหลัง แล้วหมุนกลับเข้าสนาม
+//  el < EDGE_THRESH  →  ขอบซ้าย  →  หมุนขวา  (turnBias บวก)
+//  er < EDGE_THRESH  →  ขอบขวา   →  หมุนซ้าย (turnBias ลบ)
 // =====================================================
 
 static void handleEdgeAvoid() {
     unsigned long elapsed = millis() - gStateTimer;
 
-    bool leftEdge  = (gSens.el < 200);
-    bool rightEdge = (gSens.er < 200);
+    bool leftEdge  = (gSens.el < EDGE_THRESH);
+    bool rightEdge = (gSens.er < EDGE_THRESH);
 
     if (elapsed < EDGE_BACKUP_TIME) {
+        // Phase 1: ถอยหลัง
         drive(-SPEED_MED, 0);
 
     } else if (elapsed < EDGE_BACKUP_TIME + EDGE_TURN_TIME) {
+        // Phase 2: หมุนกลับเข้าสนาม
         if (leftEdge && rightEdge) {
-            drive(0,  SPEED_SEARCH);
+            drive(0,  SPEED_SEARCH);   // ขอบทั้งสอง → หมุนขวา
         } else if (leftEdge) {
-            drive(0, -SPEED_SEARCH);
+            drive(0,  SPEED_SEARCH);   // ขอบซ้าย → หมุนขวา
         } else {
-            drive(0,  SPEED_SEARCH);
+            drive(0, -SPEED_SEARCH);   // ขอบขวา → หมุนซ้าย
         }
 
     } else {
-        setState(STATE_SEARCH);
+        // Phase 3: จบแล้วกลับ state เดิม
+        setState(gPrevState);
     }
 }
