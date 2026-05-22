@@ -3,77 +3,139 @@
  *
  * ไม่มีวัตถุ → หมุนหาช้าๆ
  * เจอวัตถุ   → track เข้าหา
- *
- * ─── การแก้ไข ───────────────────────────────────────────
- *  • เพิ่ม start gate — รอ START_PIN หรือ BUTTON_PIN ก่อน
- *    หุ่นไม่ทำงานทันทีตอนเปิดเครื่อง
- *  • เซนเซอร์กันตกอ่านค่าทันทีทุก loop โดยใช้ s.el / s.er
- *    ที่ readSensors() เก็บไว้แล้ว ไม่ต้อง analogRead() ซ้ำ
- *  • ลบ delay(100) ออก ใช้ non-blocking timer แทน
- *    → loop วิ่งเร็วเต็มที่, edge ตอบสนองทันที
- *  • เซนเซอร์ระยะ 5 ตัวไม่ถูกแตะเพิ่มเลย (readSensors เดิม)
- * ────────────────────────────────────────────────────────
- *
- * Upload this instead of sumo_robot.ino.  Open Serial Monitor at 9600 baud.
+ * ค่า edge sensor < 800 → ถอย → เลี้ยว → พุ่ง → เลี้ยว → พุ่ง → ทำงานต่อปกติ
  */
 #include <Arduino.h>
 #include "config.h"
 #include "sensors.h"
 #include "motors.h"
 
-static bool          gStarted        = false;   // [แก้ไข] start gate
 static bool          gTracking        = false;
 static bool          gSearchCW        = true;
 static unsigned long gSearchFlip      = 0;
 
-// --- non-blocking timer แทน delay(100) ---
-static unsigned long gLastPrintTime   = 0;
-#define PRINT_INTERVAL_MS  100          // พิมพ์ Serial ทุก 100 ms โดยไม่หยุด loop
+// --- START PIN toggle ---
+static bool          start            = false;   // false = รอ, true = ทำงาน
+static bool          lastStartPin     = LOW;      // สถานะก่อนหน้าของ START_PIN
+static unsigned long lastStartDebounce = 0;       // เวลาล่าสุดที่ pin เปลี่ยน
+#define DEBOUNCE_MS 50                            // หน่วง debounce (ms)
+
+// =====================================================
+//  ฟังก์ชันหันกลับเข้าสนาม
+//  ถอย → เลี้ยว → พุ่ง → เลี้ยว → พุ่ง
+// =====================================================
+void avoidEdge(bool leftEdge, bool rightEdge) {
+    int turnDir = (rightEdge && !leftEdge) ? -1 : 1;
+
+    Serial.println(F("[EDGE] ถอยหลัง..."));
+    drive(-SPEED_HIGH, 0);
+    delay(300);
+    stopMotors();
+    delay(20);
+
+    Serial.println(F("[EDGE] เลี้ยว 1..."));
+    drive(0, turnDir * SPEED_SEARCH);
+    delay(280);
+    stopMotors();
+    delay(20);
+
+    Serial.println(F("[EDGE] พุ่ง 1..."));
+    drive(SPEED_HIGH, 0);
+    delay(200);
+    stopMotors();
+    delay(20);
+
+    Serial.println(F("[EDGE] เลี้ยว 2..."));
+    drive(0, turnDir * SPEED_SEARCH);
+    delay(180);
+    stopMotors();
+    delay(20);
+
+    Serial.println(F("[EDGE] พุ่ง 2..."));
+    drive(SPEED_HIGH, 0);
+    delay(200);
+    stopMotors();
+
+    Serial.println(F("[EDGE] กลับเข้าสนามแล้ว — ทำงานต่อ"));
+}
 
 void setup() {
+    Serial.begin(SERIAL_BAUD);
+    pinMode(START_PIN, INPUT);
     initMotors();
     delay(200);
-    Serial.begin(SERIAL_BAUD);
     Serial.println(F("=== TRACKING ONLY ==="));
-    Serial.println(F("รอสัญญาณ START..."));
-    Serial.println(F("Dir   Spd  Turn  [  LS   LF   CF   RS ]  EdgeL  EdgeR"));
-    Serial.println(F("----  ---  ----  ---------------------   -----  -----"));
+    Serial.println(F("กด START ครั้งแรก = เริ่ม  |  กด START อีกครั้ง = หยุด"));
+    Serial.println(F("ไม่เจอ → หมุนหา  |  เจอ → track  |  edge → ถอย/เลี้ยว/พุ่ง"));
 }
 
 void loop() {
+    if (digitalRead(KILL_PIN) == HIGH) {
+        stopMotors();
+        Serial.println(F("[KILL] หยุดฉุกเฉิน — รีเซ็ตเพื่อเริ่มใหม่"));
+        while (true);
+    }
 
-    // ─── 0. [แก้ไข] รอสัญญาณก่อน ────────────────────────────
-    if (digitalRead(START_PIN) == HIGH || digitalRead(BUTTON_PIN) == HIGH) {
-        if (!gStarted) {
-            gStarted = true;
-            Serial.println(F("=== START! ==="));
+    // =====================================================
+    //  ตรวจ edge sensor ก่อนทุกอย่าง
+    // =====================================================
+    int edgeL = analogRead(EDGE_LEFT);
+    int edgeR = analogRead(EDGE_RIGHT);
+
+    Serial.print(F("R=")); Serial.print(edgeR);
+    Serial.print(F("  L=")); Serial.println(edgeL);
+
+    if (edgeL < EDGE_THRESH || edgeR < EDGE_THRESH) {
+        stopMotors();
+        avoidEdge(edgeL < EDGE_THRESH, edgeR < EDGE_THRESH);
+        return;
+    }
+
+    // =====================================================
+    //  ตรวจสัญญาณ START (toggle: High ครั้งแรก = เริ่ม, High ครั้งที่สอง = หยุด)
+    // =====================================================
+    bool currentStartPin = (digitalRead(START_PIN) == HIGH);
+    if (currentStartPin && !lastStartPin) {          // rising edge
+        if (millis() - lastStartDebounce > DEBOUNCE_MS) {
+            start = !start;                          // สลับสถานะ
+            lastStartDebounce = millis();
+            if (start) {
+                Serial.println(F("[START] เริ่มทำงาน!"));
+                drive(SPEED_LOW, 0);
+                delay(400);
+            } else {
+                Serial.println(F("[START] หยุดโปรแกรม — กด START อีกครั้งเพื่อเริ่มใหม่"));
+                stopMotors();
+            }
         }
     }
-    if (!gStarted) {
+    lastStartPin = currentStartPin;
+
+    if (!start) {
         stopMotors();
         return;
     }
 
-    // ─── 1. อ่านเซนเซอร์ทั้งหมดครั้งเดียว ───────────────────
+    // =====================================================
+    //  อ่านเซนเซอร์ระยะ
+    // =====================================================
     SensorData s;
     readSensors(s);
 
-    // ─── 2. ตรวจ edge ทันที ─────────────────────────────────
-    bool onEdge = isOnEdge(s);
-
-    if (onEdge) {
-        stopMotors();
-        if (millis() - gLastPrintTime >= PRINT_INTERVAL_MS) {
-            gLastPrintTime = millis();
-            Serial.print(F("*** EDGE ***  L="));
-            Serial.print(s.el);
-            Serial.print(F("  R="));
-            Serial.println(s.er);
+    // ยืนยันขอบอีกรอบหลัง avoidEdge — ถ้ายังอยู่ขอบให้ถอยต่อ
+    {
+        int reCheckL = analogRead(EDGE_LEFT);
+        int reCheckR = analogRead(EDGE_RIGHT);
+        if (reCheckL < EDGE_THRESH || reCheckR < EDGE_THRESH) {
+            stopMotors();
+            avoidEdge(reCheckL < EDGE_THRESH, reCheckR < EDGE_THRESH);
+            return;
         }
-        return;
     }
 
-    // ─── 3. ไม่เจอวัตถุ → หมุนหาช้าๆ ───────────────────────
+    // =====================================================
+    //  ไม่เห็นวัตถุ → หมุนหา
+    // =====================================================
     if (!s.detected || s.maxReading < DIST_LOST_THRESH) {
         if (gTracking) {
             Serial.println(F("LOST — หมุนหา..."));
@@ -85,20 +147,14 @@ void loop() {
             gSearchFlip = millis();
         }
 
-        int turnBias = gSearchCW ? -(SPEED_SEARCH / 2) : (SPEED_SEARCH / 2);
+        int turnBias = gSearchCW ? -(SPEED_SEARCH * 3 / 4) : (SPEED_SEARCH * 3 / 4);
         drive(0, turnBias);
-
-        if (millis() - gLastPrintTime >= PRINT_INTERVAL_MS) {
-            gLastPrintTime = millis();
-            Serial.print(F("SEARCH  EdgeL="));
-            Serial.print(s.el);
-            Serial.print(F("  EdgeR="));
-            Serial.println(s.er);
-        }
         return;
     }
 
-    // ─── 4. เจอวัตถุ → track เข้าหา ─────────────────────────
+    // =====================================================
+    //  เจอวัตถุ → track เข้าหา
+    // =====================================================
     if (!gTracking) {
         Serial.println(F("FOUND — tracking!"));
         gTracking = true;
@@ -109,39 +165,11 @@ void loop() {
 
     float absDir = abs(s.direction);
     int baseSpeed;
-    if      (absDir < 15.0f) baseSpeed = SPEED_HIGH;
-    else if (absDir < 45.0f) baseSpeed = SPEED_MED;
-    else if (absDir < 70.0f) baseSpeed = SPEED_LOW;
-    else                     baseSpeed = 0;
+    if      (absDir < 15.0f) baseSpeed = SPEED_MAX;   // ตรงหน้า → พุ่งเต็มที่
+    else if (absDir < 35.0f) baseSpeed = SPEED_HIGH;  // เฉียงนิด → เร็ว
+    else if (absDir < 60.0f) baseSpeed = SPEED_MED;   // เฉียงมาก → กลาง
+    else if (absDir < 75.0f) baseSpeed = SPEED_LOW;   // เกือบข้าง → ช้า
+    else                     baseSpeed = 0;            // ข้างเต็มๆ → หมุนกับที่
 
     drive(baseSpeed, turnBias);
-
-    static int lastSpeed = -1;
-    static int lastTurn  = -999;
-    if (baseSpeed != lastSpeed || turnBias != lastTurn ||
-        millis() - gLastPrintTime >= PRINT_INTERVAL_MS) {
-
-        gLastPrintTime = millis();
-        lastSpeed = baseSpeed;
-        lastTurn  = turnBias;
-
-        Serial.print(F("TRACK  dir="));
-        Serial.print((int)s.direction);
-        Serial.print(F("  spd="));
-        Serial.print(baseSpeed);
-        Serial.print(F("  turn="));
-        Serial.print(turnBias);
-        Serial.print(F("  [LS="));
-        Serial.print(s.ls);
-        Serial.print(F(" LF="));
-        Serial.print(s.lf);
-        Serial.print(F(" CF="));
-        Serial.print(s.cf);
-        Serial.print(F(" RS="));
-        Serial.print(s.rs);
-        Serial.print(F("]  EdgeL="));
-        Serial.print(s.el);
-        Serial.print(F("  EdgeR="));
-        Serial.println(s.er);
-    }
 }
