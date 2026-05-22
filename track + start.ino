@@ -4,21 +4,25 @@
  * ไม่มีวัตถุ → หมุนหาช้าๆ
  * เจอวัตถุ   → track เข้าหา
  * ค่า edge sensor < 800 → ถอย → เลี้ยว → พุ่ง → เลี้ยว → พุ่ง → ทำงานต่อปกติ
+ *
+ * START PIN (IR Remote):
+ *   pulse HIGH ครั้งแรก = เริ่มทำงาน
+ *   pulse HIGH ครั้งที่สอง = หยุด
  */
 #include <Arduino.h>
 #include "config.h"
 #include "sensors.h"
 #include "motors.h"
 
-static bool          gTracking        = false;
-static bool          gSearchCW        = true;
-static unsigned long gSearchFlip      = 0;
+static bool          gTracking         = false;
+static bool          gSearchCW         = true;
+static unsigned long gSearchFlip       = 0;
 
-// --- START PIN toggle ---
-static bool          start            = false;   // false = รอ, true = ทำงาน
-static bool          lastStartPin     = LOW;      // สถานะก่อนหน้าของ START_PIN
-static unsigned long lastStartDebounce = 0;       // เวลาล่าสุดที่ pin เปลี่ยน
-#define DEBOUNCE_MS 50                            // หน่วง debounce (ms)
+// --- START PIN toggle (IR pulse HIGH) ---
+static bool          start             = false;
+static bool          lastStartPin      = LOW;
+static unsigned long lastStartDebounce = 0;
+#define DEBOUNCE_MS 50
 
 // =====================================================
 //  ฟังก์ชันหันกลับเข้าสนาม
@@ -65,7 +69,7 @@ void setup() {
     initMotors();
     delay(200);
     Serial.println(F("=== TRACKING ONLY ==="));
-    Serial.println(F("กด START ครั้งแรก = เริ่ม  |  กด START อีกครั้ง = หยุด"));
+    Serial.println(F("IR pulse ครั้งแรก = เริ่ม  |  IR pulse อีกครั้ง = หยุด"));
     Serial.println(F("ไม่เจอ → หมุนหา  |  เจอ → track  |  edge → ถอย/เลี้ยว/พุ่ง"));
 }
 
@@ -92,19 +96,19 @@ void loop() {
     }
 
     // =====================================================
-    //  ตรวจสัญญาณ START (toggle: High ครั้งแรก = เริ่ม, High ครั้งที่สอง = หยุด)
+    //  ตรวจสัญญาณ START — IR pulse HIGH → toggle
     // =====================================================
     bool currentStartPin = (digitalRead(START_PIN) == HIGH);
-    if (currentStartPin && !lastStartPin) {          // rising edge
+    if (currentStartPin && !lastStartPin) {           // rising edge (จับ pulse)
         if (millis() - lastStartDebounce > DEBOUNCE_MS) {
-            start = !start;                          // สลับสถานะ
+            start = !start;
             lastStartDebounce = millis();
             if (start) {
                 Serial.println(F("[START] เริ่มทำงาน!"));
                 drive(SPEED_LOW, 0);
                 delay(400);
             } else {
-                Serial.println(F("[START] หยุดโปรแกรม — กด START อีกครั้งเพื่อเริ่มใหม่"));
+                Serial.println(F("[START] หยุดโปรแกรม — ส่ง IR อีกครั้งเพื่อเริ่มใหม่"));
                 stopMotors();
             }
         }
@@ -122,7 +126,7 @@ void loop() {
     SensorData s;
     readSensors(s);
 
-    // ยืนยันขอบอีกรอบหลัง avoidEdge — ถ้ายังอยู่ขอบให้ถอยต่อ
+    // ยืนยันขอบอีกรอบหลัง avoidEdge
     {
         int reCheckL = analogRead(EDGE_LEFT);
         int reCheckR = analogRead(EDGE_RIGHT);
@@ -165,11 +169,11 @@ void loop() {
 
     float absDir = abs(s.direction);
     int baseSpeed;
-    if      (absDir < 15.0f) baseSpeed = SPEED_MAX;   // ตรงหน้า → พุ่งเต็มที่
-    else if (absDir < 35.0f) baseSpeed = SPEED_HIGH;  // เฉียงนิด → เร็ว
-    else if (absDir < 60.0f) baseSpeed = SPEED_MED;   // เฉียงมาก → กลาง
-    else if (absDir < 75.0f) baseSpeed = SPEED_LOW;   // เกือบข้าง → ช้า
-    else                     baseSpeed = 0;            // ข้างเต็มๆ → หมุนกับที่
+    if      (absDir < 15.0f) baseSpeed = SPEED_MAX;
+    else if (absDir < 35.0f) baseSpeed = SPEED_HIGH;
+    else if (absDir < 60.0f) baseSpeed = SPEED_MED;
+    else if (absDir < 75.0f) baseSpeed = SPEED_LOW;
+    else                     baseSpeed = 0;
 
     drive(baseSpeed, turnBias);
 }
